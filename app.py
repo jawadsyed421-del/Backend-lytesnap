@@ -6,6 +6,7 @@ Vercel imports the module-level `app` object from this file
 Local:  uvicorn app:app --reload
 """
 import os
+import re
 import json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -36,6 +37,11 @@ SCHEDULE_PATH = BASE_DIR / "schedules" / "schedule_state.json"
 # Serverless filesystems are read-only apart from /tmp, so config writes land
 # there. This survives a warm instance only — see README for durable storage.
 IS_SERVERLESS = bool(os.environ.get("VERCEL"))
+PLATFORM = (
+    "Vercel Serverless Function" if IS_SERVERLESS
+    else "Render" if os.environ.get("RENDER")
+    else "local"
+)
 CONFIG_WRITE_PATH = Path("/tmp/config.json") if IS_SERVERLESS else CONFIG_PATH
 
 
@@ -43,6 +49,26 @@ class ClassifyRequest(BaseModel):
     topic: str
     titles: List[str]
     api_key: Optional[str] = None
+
+
+def _parse_scores(text: str, expected: int) -> Optional[List[int]]:
+    """Pull the JSON array out of the model's reply, which is often fenced."""
+    cleaned = re.sub(r"^\s*```(?:json)?|```\s*$", "", text.strip(), flags=re.MULTILINE).strip()
+
+    candidates = [cleaned]
+    bracketed = re.search(r"\[[^\[\]]*\]", cleaned)
+    if bracketed:
+        candidates.append(bracketed.group(0))
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(parsed, list) and len(parsed) == expected
+                and all(isinstance(v, int) for v in parsed)):
+            return parsed
+    return None
 
 
 def _read_config() -> Dict[str, Any]:
@@ -60,7 +86,7 @@ def root():
         "status": "online",
         "service": "LyteSnap AI Backend",
         "version": "1.0.0",
-        "platform": "Vercel Serverless Function" if IS_SERVERLESS else "local",
+        "platform": PLATFORM,
         "endpoints": [
             "/api/health",
             "/api/config",
@@ -139,10 +165,7 @@ def classify_titles(payload: ClassifyRequest):
         )
         content_text = response.content[0].text
 
-        try:
-            scores = json.loads(content_text.strip())
-        except json.JSONDecodeError:
-            scores = None
+        scores = _parse_scores(content_text, len(payload.titles))
 
         return {
             "topic": payload.topic,
